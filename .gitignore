@@ -1,0 +1,7 @@
+target/
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.png
+__pycache__/
