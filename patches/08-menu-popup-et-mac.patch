@@ -1,0 +1,44 @@
+Patch LibrePods : 08-menu-popup-et-mac
+
+Entrée "Afficher la pop-up" dans le menu de l'icône + adresse Bluetooth pour le bouton Connecter.
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/le.rs b/linux-rust/src/bluetooth/le.rs
+index b2dec2b..43489cc 100644
+--- a/linux-rust/src/bluetooth/le.rs
++++ b/linux-rust/src/bluetooth/le.rs
+@@ -331,7 +331,10 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                                         // (0xff = inconnue), pour ne pas effacer une bonne valeur.
+                                         {
+                                             let b = |x: bool| if x { "1".to_string() } else { "0".to_string() };
+-                                            let mut champs: Vec<(&str, String)> = vec![("nom", nom_popup.clone())];
++                                            let mut champs: Vec<(&str, String)> = vec![
++                                                ("nom", nom_popup.clone()),
++                                                ("mac", matched_airpods_mac.clone().unwrap_or_default()),
++                                            ];
+                                             if left_byte != 0xff {
+                                                 champs.push(("gauche", left_battery.to_string()));
+                                                 champs.push(("gauche_charge", b(left_charging)));
+diff --git a/linux-rust/src/ui/tray.rs b/linux-rust/src/ui/tray.rs
+index c0b0807..585f66f 100644
+--- a/linux-rust/src/ui/tray.rs
++++ b/linux-rust/src/ui/tray.rs
+@@ -133,6 +133,17 @@ impl ksni::Tray for MyTray {
+             .unwrap_or(0);
+         let options_clone = options.clone();
+         vec![
++            // Ouvre la petite bulle (pop-up B). Sous GNOME, le clic gauche sur l'icône
++            // ouvre ce menu au lieu d'appeler activate(), d'où cette entrée en premier.
++            StandardItem {
++                label: "Afficher la pop-up".into(),
++                icon_name: "audio-headphones".into(),
++                activate: Box::new(|_this: &mut Self| {
++                    crate::utils::ouvrir_popup(true);
++                }),
++                ..Default::default()
++            }
++            .into(),
+             StandardItem {
+                 label: "Open Window".into(),
+                 icon_name: "window-new".into(),

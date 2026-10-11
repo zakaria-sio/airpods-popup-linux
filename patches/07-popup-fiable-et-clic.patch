@@ -1,0 +1,290 @@
+Patch LibrePods : 07-popup-fiable-et-clic
+
+Pop-up fiable (une seule à la fois, adresses BLE qui changent), fermeture quand les 2 écouteurs sont dans les oreilles, clic sur l'icône.
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/aacp.rs b/linux-rust/src/bluetooth/aacp.rs
+index d12a73d..7bf6d22 100644
+--- a/linux-rust/src/bluetooth/aacp.rs
++++ b/linux-rust/src/bluetooth/aacp.rs
+@@ -568,6 +568,24 @@ impl AACPManager {
+                     }
+                 }
+                 state.battery_info = batteries.clone();
++                // Pop-up : batteries connues uniquement
++                {
++                    let mut champs: Vec<(&str, String)> = Vec::new();
++                    for b in &batteries {
++                        if b.status == BatteryStatus::Disconnected || b.level > 100 {
++                            continue;
++                        }
++                        let (cle, cle_charge) = match b.component {
++                            BatteryComponent::Left => ("gauche", "gauche_charge"),
++                            BatteryComponent::Right => ("droite", "droite_charge"),
++                            BatteryComponent::Case => ("boitier", "boitier_charge"),
++                            _ => continue,
++                        };
++                        champs.push((cle, b.level.to_string()));
++                        champs.push((cle_charge, if b.status == BatteryStatus::Charging { "1" } else { "0" }.to_string()));
++                    }
++                    crate::utils::maj_etat_popup(&champs);
++                }
+                 if let Some(ref tx) = state.event_tx {
+                     let _ = tx.send(AACPEvent::BatteryInfo(batteries));
+                 }
+@@ -652,6 +670,15 @@ impl AACPManager {
+                 let mut state = self.state.lock().await;
+                 state.old_ear_detection_status = state.ear_detection_status.clone();
+                 state.ear_detection_status = statuses.clone();
++                // Pop-up : combien d'ecouteurs dans le boitier / dans les oreilles
++                {
++                    let dans = statuses.iter().filter(|s| matches!(s, EarDetectionStatus::InCase)).count();
++                    let oreilles = statuses.iter().filter(|s| matches!(s, EarDetectionStatus::InEar)).count();
++                    crate::utils::maj_etat_popup(&[
++                        ("dans_boitier", dans.to_string()),
++                        ("en_oreille", oreilles.to_string()),
++                    ]);
++                }
+ 
+                 if let Some(ref tx) = state.event_tx {
+                     debug!(
+diff --git a/linux-rust/src/bluetooth/le.rs b/linux-rust/src/bluetooth/le.rs
+index db97303..b2dec2b 100644
+--- a/linux-rust/src/bluetooth/le.rs
++++ b/linux-rust/src/bluetooth/le.rs
+@@ -21,74 +21,6 @@ use tokio::sync::Mutex;
+ // Le boitier change d'adresse Bluetooth regulierement, donc plusieurs taches l'ecoutent :
+ // l'etat doit etre commun pour ne pas lancer deux pop-ups.
+ static ETAT_COUVERCLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+-// Le programme de la pop-up en cours (s'il y en a un).
+-static POPUP: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+-
+-fn chemin_popup() -> std::path::PathBuf {
+-    // Modifiable avec la variable d'environnement LIBREPODS_POPUP
+-    if let Ok(p) = std::env::var("LIBREPODS_POPUP") {
+-        return std::path::PathBuf::from(p);
+-    }
+-    let home = std::env::var("HOME").unwrap_or_default();
+-    std::path::PathBuf::from(home)
+-        .join(".local/share/airpods_popup/airpods-flipbook/target/release/airpods-flipbook")
+-}
+-
+-fn ouvrir_popup() {
+-    let mut guard = match POPUP.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+-    // Deja ouverte et toujours vivante ? On ne fait rien.
+-    if let Some(child) = guard.as_mut() {
+-        if let Ok(None) = child.try_wait() {
+-            return;
+-        }
+-    }
+-    let chemin = chemin_popup();
+-    match std::process::Command::new(&chemin)
+-        .env("POPUP_BOUCLE", "1")
+-        // Mode X11 (XWayland) : seul moyen sous GNOME de rester au premier plan
+-        .env_remove("WAYLAND_DISPLAY")
+-        .spawn()
+-    {
+-        Ok(child) => {
+-            info!("[POPUP] Pop-up lancee (pid {})", child.id());
+-            *guard = Some(child);
+-        }
+-        Err(e) => log::warn!("[POPUP] Impossible de lancer {} : {}", chemin.display(), e),
+-    }
+-}
+-
+-fn fermer_popup() {
+-    let mut guard = match POPUP.lock() { Ok(g) => g, Err(e) => e.into_inner() };
+-    if let Some(mut child) = guard.take() {
+-        let _ = child.kill();
+-        let _ = child.wait(); // evite un processus "zombie"
+-        info!("[POPUP] Pop-up fermee");
+-    }
+-}
+-
+-// Ecrit l'etat des AirPods dans un petit fichier texte que la pop-up relit en continu.
+-// Format : une ligne "cle=valeur" par info, -1 = inconnu.
+-// Ecriture "atomique" : on ecrit un fichier temporaire puis on le renomme,
+-// pour que la pop-up ne lise jamais un fichier a moitie ecrit.
+-fn ecrire_etat_popup(nom: &str, gauche: i32, gauche_charge: bool, droite: i32, droite_charge: bool,
+-                     boitier: i32, boitier_charge: bool, gauche_oreille: bool, droite_oreille: bool,
+-                     dans_boitier: u8) {
+-    let home = std::env::var("HOME").unwrap_or_default();
+-    let dossier = std::path::PathBuf::from(home).join(".local/share/airpods_popup");
+-    if std::fs::create_dir_all(&dossier).is_err() {
+-        return;
+-    }
+-    let b = |x: bool| if x { 1 } else { 0 };
+-    let contenu = format!(
+-        "nom={}\ngauche={}\ngauche_charge={}\ndroite={}\ndroite_charge={}\nboitier={}\nboitier_charge={}\ngauche_oreille={}\ndroite_oreille={}\ndans_boitier={}\n",
+-        nom.replace('\n', " "), gauche, b(gauche_charge), droite, b(droite_charge),
+-        boitier, b(boitier_charge), b(gauche_oreille), b(droite_oreille), dans_boitier
+-    );
+-    let tmp = dossier.join("etat.txt.tmp");
+-    if std::fs::write(&tmp, contenu).is_ok() {
+-        let _ = std::fs::rename(&tmp, dossier.join("etat.txt"));
+-    }
+-}
+ 
+ fn decrypt(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
+     let cipher = Aes128::new(&Array::from(*key));
+@@ -252,9 +184,9 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                                                     apple_data[8]
+                                                 );
+                                                 if ouvert {
+-                                                    ouvrir_popup();
++                                                    crate::utils::ouvrir_popup(false);
+                                                 } else {
+-                                                    fermer_popup();
++                                                    crate::utils::fermer_popup();
+                                                 }
+                                             }
+                                         }
+@@ -395,20 +327,28 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                                             (case_byte & 0x7F, (case_byte & 0x80) != 0)
+                                         };
+ 
+-                                        // Infos pour la pop-up (-1 = inconnu)
+-                                        ecrire_etat_popup(
+-                                            &nom_popup,
+-                                            if left_byte == 0xff { -1 } else { left_battery },
+-                                            left_charging,
+-                                            if right_byte == 0xff { -1 } else { right_battery },
+-                                            right_charging,
+-                                            if case_byte == 0xff { -1 } else { case_battery },
+-                                            case_charging,
+-                                            is_left_in_ear,
+-                                            is_right_in_ear,
++                                        // Infos pour la pop-up : on n'ecrit une batterie que si elle est connue
++                                        // (0xff = inconnue), pour ne pas effacer une bonne valeur.
++                                        {
++                                            let b = |x: bool| if x { "1".to_string() } else { "0".to_string() };
++                                            let mut champs: Vec<(&str, String)> = vec![("nom", nom_popup.clone())];
++                                            if left_byte != 0xff {
++                                                champs.push(("gauche", left_battery.to_string()));
++                                                champs.push(("gauche_charge", b(left_charging)));
++                                            }
++                                            if right_byte != 0xff {
++                                                champs.push(("droite", right_battery.to_string()));
++                                                champs.push(("droite_charge", b(right_charging)));
++                                            }
++                                            if case_byte != 0xff {
++                                                champs.push(("boitier", case_battery.to_string()));
++                                                champs.push(("boitier_charge", b(case_charging)));
++                                            }
+                                             // Octet "status" : bit 2 = les 2 dans le boitier, bit 4 = un seul
+-                                            if status & 0x04 != 0 { 2 } else if status & 0x10 != 0 { 1 } else { 0 },
+-                                        );
++                                            let dans = if status & 0x04 != 0 { 2 } else if status & 0x10 != 0 { 1 } else { 0 };
++                                            champs.push(("dans_boitier", dans.to_string()));
++                                            crate::utils::maj_etat_popup(&champs);
++                                        }
+ 
+                                         if let Some(handle) = &tray_handle_clone {
+                                             handle
+diff --git a/linux-rust/src/ui/tray.rs b/linux-rust/src/ui/tray.rs
+index b3adbc5..c0b0807 100644
+--- a/linux-rust/src/ui/tray.rs
++++ b/linux-rust/src/ui/tray.rs
+@@ -27,6 +27,10 @@ pub struct MyTray {
+ }
+ 
+ impl ksni::Tray for MyTray {
++    // Clic gauche sur l'icone : on affiche la pop-up
++    fn activate(&mut self, _x: i32, _y: i32) {
++        crate::utils::ouvrir_popup(true);
++    }
+     fn id(&self) -> String {
+         env!("CARGO_PKG_NAME").into()
+     }
+diff --git a/linux-rust/src/utils.rs b/linux-rust/src/utils.rs
+index 88ee466..dc768c9 100644
+--- a/linux-rust/src/utils.rs
++++ b/linux-rust/src/utils.rs
+@@ -156,3 +156,86 @@ impl From<MyTheme> for Theme {
+         }
+     }
+ }
++
++
++// ======================= Pop-up AirPods =======================
++// Le programme de la pop-up en cours (s'il y en a un).
++static POPUP: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
++
++fn dossier_popup() -> PathBuf {
++    let home = std::env::var("HOME").unwrap_or_default();
++    PathBuf::from(home).join(".local/share/airpods_popup")
++}
++
++fn chemin_popup() -> PathBuf {
++    // Modifiable avec la variable d'environnement LIBREPODS_POPUP
++    if let Ok(p) = std::env::var("LIBREPODS_POPUP") {
++        return PathBuf::from(p);
++    }
++    dossier_popup().join("airpods-flipbook/target/release/airpods-flipbook")
++}
++
++/// Lance la pop-up. `manuel` = ouverte par un clic sur l'icone (elle se ferme seule apres quelques secondes).
++pub fn ouvrir_popup(manuel: bool) {
++    let mut guard = match POPUP.lock() { Ok(g) => g, Err(e) => e.into_inner() };
++    if let Some(child) = guard.as_mut() {
++        if let Ok(None) = child.try_wait() {
++            return; // deja ouverte
++        }
++    }
++    let chemin = chemin_popup();
++    let mut cmd = std::process::Command::new(&chemin);
++    cmd.env("POPUP_BOUCLE", "1")
++        // Mode X11 (XWayland) : seul moyen sous GNOME de rester au premier plan
++        .env_remove("WAYLAND_DISPLAY");
++    if manuel {
++        cmd.env("POPUP_MANUEL", "1");
++    }
++    match cmd.spawn() {
++        Ok(child) => {
++            log::info!("[POPUP] Pop-up lancee (pid {}{})", child.id(), if manuel { ", ouverte au clic" } else { "" });
++            *guard = Some(child);
++        }
++        Err(e) => log::warn!("[POPUP] Impossible de lancer {} : {}", chemin.display(), e),
++    }
++}
++
++pub fn fermer_popup() {
++    let mut guard = match POPUP.lock() { Ok(g) => g, Err(e) => e.into_inner() };
++    if let Some(mut child) = guard.take() {
++        let _ = child.kill();
++        let _ = child.wait(); // evite un processus "zombie"
++        log::info!("[POPUP] Pop-up fermee");
++    }
++}
++
++/// Met a jour certaines lignes "cle=valeur" du fichier d'etat lu par la pop-up,
++/// en gardant les autres. Plusieurs parties de LibrePods y ecrivent (signal du boitier,
++/// connexion directe), donc on fusionne au lieu d'ecraser.
++pub fn maj_etat_popup(champs: &[(&str, String)]) {
++    static VERROU: std::sync::Mutex<()> = std::sync::Mutex::new(());
++    let _v = match VERROU.lock() { Ok(g) => g, Err(e) => e.into_inner() };
++    let dossier = dossier_popup();
++    if std::fs::create_dir_all(&dossier).is_err() {
++        return;
++    }
++    let fichier = dossier.join("etat.txt");
++    let mut lignes: Vec<(String, String)> = std::fs::read_to_string(&fichier)
++        .unwrap_or_default()
++        .lines()
++        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
++        .collect();
++    for (cle, valeur) in champs {
++        let valeur = valeur.replace('\n', " ");
++        match lignes.iter_mut().find(|(k, _)| k == cle) {
++            Some(l) => l.1 = valeur,
++            None => lignes.push((cle.to_string(), valeur)),
++        }
++    }
++    let contenu: String = lignes.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
++    // Ecriture "atomique" : fichier temporaire puis renommage
++    let tmp = dossier.join("etat.txt.tmp");
++    if std::fs::write(&tmp, contenu).is_ok() {
++        let _ = std::fs::rename(&tmp, &fichier);
++    }
++}

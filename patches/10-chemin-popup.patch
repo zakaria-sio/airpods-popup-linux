@@ -1,0 +1,23 @@
+Patch LibrePods : 10-chemin-popup
+
+Cherche la pop-up dans ~/.local/bin/airpods-popup (installée par install.sh).
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/utils.rs b/linux-rust/src/utils.rs
+index 05de89e..330f715 100644
+--- a/linux-rust/src/utils.rs
++++ b/linux-rust/src/utils.rs
+@@ -172,6 +172,12 @@ fn chemin_popup() -> PathBuf {
+     if let Ok(p) = std::env::var("LIBREPODS_POPUP") {
+         return PathBuf::from(p);
+     }
++    // Installée par install.sh dans ~/.local/bin, sinon l'ancien emplacement
++    let home = std::env::var("HOME").unwrap_or_default();
++    let installee = PathBuf::from(home).join(".local/bin/airpods-popup");
++    if installee.exists() {
++        return installee;
++    }
+     dossier_popup().join("airpods-flipbook/target/release/airpods-flipbook")
+ }
+ 

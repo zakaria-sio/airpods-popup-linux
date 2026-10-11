@@ -1,0 +1,73 @@
+Patch LibrePods : 05-infos-popup
+
+Écrit les infos pour la pop-up (nom, batteries) dans ~/.local/share/airpods_popup/etat.txt.
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/le.rs b/linux-rust/src/bluetooth/le.rs
+index 371c149..834a6d5 100644
+--- a/linux-rust/src/bluetooth/le.rs
++++ b/linux-rust/src/bluetooth/le.rs
+@@ -66,6 +66,29 @@ fn fermer_popup() {
+     }
+ }
+ 
++// Ecrit l'etat des AirPods dans un petit fichier texte que la pop-up relit en continu.
++// Format : une ligne "cle=valeur" par info, -1 = inconnu.
++// Ecriture "atomique" : on ecrit un fichier temporaire puis on le renomme,
++// pour que la pop-up ne lise jamais un fichier a moitie ecrit.
++fn ecrire_etat_popup(nom: &str, gauche: i32, gauche_charge: bool, droite: i32, droite_charge: bool,
++                     boitier: i32, boitier_charge: bool, gauche_oreille: bool, droite_oreille: bool) {
++    let home = std::env::var("HOME").unwrap_or_default();
++    let dossier = std::path::PathBuf::from(home).join(".local/share/airpods_popup");
++    if std::fs::create_dir_all(&dossier).is_err() {
++        return;
++    }
++    let b = |x: bool| if x { 1 } else { 0 };
++    let contenu = format!(
++        "nom={}\ngauche={}\ngauche_charge={}\ndroite={}\ndroite_charge={}\nboitier={}\nboitier_charge={}\ngauche_oreille={}\ndroite_oreille={}\n",
++        nom.replace('\n', " "), gauche, b(gauche_charge), droite, b(droite_charge),
++        boitier, b(boitier_charge), b(gauche_oreille), b(droite_oreille)
++    );
++    let tmp = dossier.join("etat.txt.tmp");
++    if std::fs::write(&tmp, contenu).is_ok() {
++        let _ = std::fs::rename(&tmp, dossier.join("etat.txt"));
++    }
++}
++
+ fn decrypt(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
+     let cipher = Aes128::new(&Array::from(*key));
+     let mut block = Array::from(*data);
+@@ -191,6 +214,12 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+             }
+ 
+             if matched_airpods_mac.is_some() {
++                // Nom des AirPods pour la pop-up (ex : "AirPods Pro 3 de Zakaria")
++                let nom_popup = matched_airpods_mac
++                    .as_ref()
++                    .and_then(|m| all_devices.get(m))
++                    .map(|d| d.name.trim().to_string())
++                    .unwrap_or_else(|| "AirPods".to_string());
+                 let mut events = dev.events().await?;
+                 let tray_handle_clone = tray_handle.clone();
+                 let connecting_macs_clone = Arc::clone(&connecting_macs);
+@@ -365,6 +394,19 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                                             (case_byte & 0x7F, (case_byte & 0x80) != 0)
+                                         };
+ 
++                                        // Infos pour la pop-up (-1 = inconnu)
++                                        ecrire_etat_popup(
++                                            &nom_popup,
++                                            if left_byte == 0xff { -1 } else { left_battery },
++                                            left_charging,
++                                            if right_byte == 0xff { -1 } else { right_battery },
++                                            right_charging,
++                                            if case_byte == 0xff { -1 } else { case_battery },
++                                            case_charging,
++                                            is_left_in_ear,
++                                            is_right_in_ear,
++                                        );
++
+                                         if let Some(handle) = &tray_handle_clone {
+                                             handle
+                                                 .update(|tray: &mut MyTray| {

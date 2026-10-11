@@ -1,0 +1,66 @@
+Patch LibrePods : 02-batterie-boitier
+
+Batterie du boîtier : garde la dernière bonne valeur au lieu d'afficher 0 %.
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/aacp.rs b/linux-rust/src/bluetooth/aacp.rs
+index b0ae420..d12a73d 100644
+--- a/linux-rust/src/bluetooth/aacp.rs
++++ b/linux-rust/src/bluetooth/aacp.rs
+@@ -543,6 +543,8 @@ impl AACPManager {
+                             0x01 => BatteryStatus::Charging,
+                             0x02 => BatteryStatus::NotCharging,
+                             0x04 => BatteryStatus::Disconnected,
++                            // 0x05 = charge (bit 0x01) + dans le boitier : on le traite comme "en charge"
++                            x if x & 0x01 != 0 => BatteryStatus::Charging,
+                             _ => {
+                                 error!("Unknown battery status: {:#04x}", payload[base_index + 3]);
+                                 continue;
+@@ -551,6 +553,20 @@ impl AACPManager {
+                     });
+                 }
+                 let mut state = self.state.lock().await;
++                // Les AirPods n'envoient la batterie du boitier que si un ecouteur est dedans.
++                // Sinon ils envoient "0% / Disconnected" (ou 255). On garde alors la derniere valeur connue.
++                for comp in [BatteryComponent::Left, BatteryComponent::Right, BatteryComponent::Case] {
++                    let is_valid = |b: &BatteryInfo| {
++                        b.component == comp && b.status != BatteryStatus::Disconnected && b.level <= 100
++                    };
++                    if batteries.iter().any(|b| is_valid(b)) {
++                        continue;
++                    }
++                    if let Some(prev) = state.battery_info.iter().find(|b| is_valid(b)).cloned() {
++                        batteries.retain(|b| b.component != comp);
++                        batteries.push(BatteryInfo { status: BatteryStatus::NotCharging, ..prev });
++                    }
++                }
+                 state.battery_info = batteries.clone();
+                 if let Some(ref tx) = state.event_tx {
+                     let _ = tx.send(AACPEvent::BatteryInfo(batteries));
+diff --git a/linux-rust/src/ui/window.rs b/linux-rust/src/ui/window.rs
+index 4574b97..0f2de91 100644
+--- a/linux-rust/src/ui/window.rs
++++ b/linux-rust/src/ui/window.rs
+@@ -702,8 +702,10 @@ impl App {
+                                                     .map(|x| x.level).unwrap_or_default();
+                                                 let right = b.iter().find(|x| x.component == BatteryComponent::Right)
+                                                     .map(|x| x.level).unwrap_or_default();
+-                                                let case  = b.iter().find(|x| x.component == BatteryComponent::Case)
+-                                                    .map(|x| x.level).unwrap_or_default();
++                                                // "—" si la batterie du boitier n'a jamais ete recue
++                                                let case  = b.iter().find(|x| x.component == BatteryComponent::Case
++                                                        && x.status != BatteryStatus::Disconnected && x.level <= 100)
++                                                    .map(|x| format!("{}%", x.level)).unwrap_or_else(|| "—".to_string());
+                                                 let left_charging = b.iter().find(|x| x.component == BatteryComponent::Left)
+                                                     .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
+                                                 let right_charging = b.iter().find(|x| x.component == BatteryComponent::Right)
+@@ -711,7 +713,7 @@ impl App {
+                                                 let case_charging = b.iter().find(|x| x.component == BatteryComponent::Case)
+                                                     .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
+                                                 format!(
+-                                                    "\u{1018E5} {}%{} \u{1018E8} {}%{} \u{100E6C} {}%{}",
++                                                    "\u{1018E5} {}%{} \u{1018E8} {}%{} \u{100E6C} {}{}",
+                                                     left, if left_charging {"\u{1002E6}"} else {""}, right, if right_charging {"\u{1002E6}"} else {""}, case, if case_charging {"\u{1002E6}"} else {""}
+                                                 )
+                                             }

@@ -1,0 +1,73 @@
+Patch LibrePods : 01-sauvegarde-cles
+
+Enregistre les clés IRK/ENC des AirPods même si l'appareil n'est pas encore connu
+(corrige "Device information is not AirPods").
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/aacp.rs b/linux-rust/src/bluetooth/aacp.rs
+index bed6ca8..b0ae420 100644
+--- a/linux-rust/src/bluetooth/aacp.rs
++++ b/linux-rust/src/bluetooth/aacp.rs
+@@ -714,11 +714,21 @@ impl AACPManager {
+                     },
+                 };
+                 let mut state = self.state.lock().await;
+-                if let Some(mac) = state.airpods_mac
+-                    && let Some(device_data) = state.devices.get_mut(&mac.to_string())
+-                {
++                if let Some(mac) = state.airpods_mac {
++                    let mac_str = mac.to_string();
++                    let device_data = state.devices.entry(mac_str.clone()).or_insert(DeviceData {
++                        name: mac_str.clone(),
++                        type_: DeviceType::AirPods,
++                        information: None,
++                    });
++                    // Garder les cles deja recues (elles peuvent arriver avant les infos)
++                    let mut info = info.clone();
++                    if let Some(DeviceInformation::AirPods(old)) = &device_data.information {
++                        if info.le_keys.irk.is_empty() { info.le_keys.irk = old.le_keys.irk.clone(); }
++                        if info.le_keys.enc_key.is_empty() { info.le_keys.enc_key = old.le_keys.enc_key.clone(); }
++                    }
+                     device_data.name = info.name.clone();
+-                    device_data.information = Some(DeviceInformation::AirPods(info.clone()));
++                    device_data.information = Some(DeviceInformation::AirPods(info));
+                 }
+                 let json = serde_json::to_string(&state.devices).unwrap();
+                 if let Some(parent) = get_devices_path().parent()
+@@ -768,10 +778,8 @@ impl AACPManager {
+                     offset += key_length;
+                 }
+                 info!(
+-                    "Received Proximity Keys Response: {:?}",
+-                    keys.iter()
+-                        .map(|(kt, kd)| (kt, hex::encode(kd)))
+-                        .collect::<Vec<_>>()
++                    "Received Proximity Keys Response: {} key(s) (values hidden)",
++                    keys.len()
+                 );
+                 let mut state = self.state.lock().await;
+                 for (key_type, key_data) in &keys {
+@@ -785,6 +793,22 @@ impl AACPManager {
+                                 type_: DeviceType::AirPods,
+                                 information: None,
+                             });
++                        if device_data.information.is_none() {
++                            device_data.information = Some(DeviceInformation::AirPods(AirPodsInformation {
++                                name: device_data.name.clone(),
++                                model_number: String::new(),
++                                manufacturer: String::new(),
++                                serial_number: String::new(),
++                                version1: String::new(),
++                                version2: String::new(),
++                                hardware_revision: String::new(),
++                                updater_identifier: String::new(),
++                                left_serial_number: String::new(),
++                                right_serial_number: String::new(),
++                                version3: String::new(),
++                                le_keys: AirPodsLEKeys { irk: String::new(), enc_key: String::new() },
++                            }));
++                        }
+                         match kt {
+                             ProximityKeyType::Irk => match device_data.information.as_mut() {
+                                 Some(DeviceInformation::AirPods(info)) => {

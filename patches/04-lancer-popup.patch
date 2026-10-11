@@ -1,0 +1,101 @@
+Patch LibrePods : 04-lancer-popup
+
+Ouvre la pop-up quand le couvercle s'ouvre, la ferme quand il se referme.
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/le.rs b/linux-rust/src/bluetooth/le.rs
+index cf69b5e..371c149 100644
+--- a/linux-rust/src/bluetooth/le.rs
++++ b/linux-rust/src/bluetooth/le.rs
+@@ -16,6 +16,56 @@ use std::str::FromStr;
+ use std::sync::Arc;
+ use tokio::sync::Mutex;
+ 
++// ---------- Pop-up a l'ouverture du boitier ----------
++// Etat du couvercle partage entre toutes les taches (0 = inconnu, 1 = ouvert, 2 = ferme).
++// Le boitier change d'adresse Bluetooth regulierement, donc plusieurs taches l'ecoutent :
++// l'etat doit etre commun pour ne pas lancer deux pop-ups.
++static ETAT_COUVERCLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
++// Le programme de la pop-up en cours (s'il y en a un).
++static POPUP: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
++
++fn chemin_popup() -> std::path::PathBuf {
++    // Modifiable avec la variable d'environnement LIBREPODS_POPUP
++    if let Ok(p) = std::env::var("LIBREPODS_POPUP") {
++        return std::path::PathBuf::from(p);
++    }
++    let home = std::env::var("HOME").unwrap_or_default();
++    std::path::PathBuf::from(home)
++        .join(".local/share/airpods_popup/airpods-flipbook/target/release/airpods-flipbook")
++}
++
++fn ouvrir_popup() {
++    let mut guard = match POPUP.lock() { Ok(g) => g, Err(e) => e.into_inner() };
++    // Deja ouverte et toujours vivante ? On ne fait rien.
++    if let Some(child) = guard.as_mut() {
++        if let Ok(None) = child.try_wait() {
++            return;
++        }
++    }
++    let chemin = chemin_popup();
++    match std::process::Command::new(&chemin)
++        .env("POPUP_BOUCLE", "1")
++        // Mode X11 (XWayland) : seul moyen sous GNOME de rester au premier plan
++        .env_remove("WAYLAND_DISPLAY")
++        .spawn()
++    {
++        Ok(child) => {
++            info!("[POPUP] Pop-up lancee (pid {})", child.id());
++            *guard = Some(child);
++        }
++        Err(e) => log::warn!("[POPUP] Impossible de lancer {} : {}", chemin.display(), e),
++    }
++}
++
++fn fermer_popup() {
++    let mut guard = match POPUP.lock() { Ok(g) => g, Err(e) => e.into_inner() };
++    if let Some(mut child) = guard.take() {
++        let _ = child.kill();
++        let _ = child.wait(); // evite un processus "zombie"
++        info!("[POPUP] Pop-up fermee");
++    }
++}
++
+ fn decrypt(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
+     let cipher = Aes128::new(&Array::from(*key));
+     let mut block = Array::from(*data);
+@@ -145,8 +195,6 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                 let tray_handle_clone = tray_handle.clone();
+                 let connecting_macs_clone = Arc::clone(&connecting_macs);
+                 tokio::spawn(async move {
+-                    // Etat du couvercle du boitier (None = pas encore connu)
+-                    let mut couvercle_ouvert: Option<bool> = None;
+                     while let Some(ev) = events.next().await {
+                         match ev {
+                             bluer::DeviceEvent::PropertyChanged(prop) => {
+@@ -162,13 +210,22 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                                         // (bit 3 : 0 = ouvert, 1 = ferme). Voir "Proximity Pairing Message.md".
+                                         if apple_data.len() > 8 {
+                                             let ouvert = (apple_data[8] & 0x08) == 0;
+-                                            if couvercle_ouvert != Some(ouvert) {
+-                                                couvercle_ouvert = Some(ouvert);
++                                            let nouvel_etat: u8 = if ouvert { 1 } else { 2 };
++                                            let ancien = ETAT_COUVERCLE.swap(
++                                                nouvel_etat,
++                                                std::sync::atomic::Ordering::SeqCst,
++                                            );
++                                            if ancien != nouvel_etat {
+                                                 info!(
+                                                     "[POPUP] Couvercle du boitier : {} (octet 8 = {:#04x})",
+                                                     if ouvert { "OUVERT" } else { "FERME" },
+                                                     apple_data[8]
+                                                 );
++                                                if ouvert {
++                                                    ouvrir_popup();
++                                                } else {
++                                                    fermer_popup();
++                                                }
+                                             }
+                                         }
+                                         debug!(

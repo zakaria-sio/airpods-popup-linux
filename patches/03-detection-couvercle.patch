@@ -1,0 +1,39 @@
+Patch LibrePods : 03-detection-couvercle
+
+Lit le signal Bluetooth (BLE) des AirPods pour savoir si le couvercle du boîtier est ouvert ou fermé.
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/le.rs b/linux-rust/src/bluetooth/le.rs
+index 69918bf..cf69b5e 100644
+--- a/linux-rust/src/bluetooth/le.rs
++++ b/linux-rust/src/bluetooth/le.rs
+@@ -145,6 +145,8 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                 let tray_handle_clone = tray_handle.clone();
+                 let connecting_macs_clone = Arc::clone(&connecting_macs);
+                 tokio::spawn(async move {
++                    // Etat du couvercle du boitier (None = pas encore connu)
++                    let mut couvercle_ouvert: Option<bool> = None;
+                     while let Some(ev) = events.next().await {
+                         match ev {
+                             bluer::DeviceEvent::PropertyChanged(prop) => {
+@@ -156,6 +158,19 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                                         let last_16: [u8; 16] =
+                                             apple_data[apple_data.len() - 16..].try_into().unwrap();
+                                         let decrypted = decrypt(enc_key, &last_16);
++                                        // Octet 8 du message Apple = indicateur du couvercle
++                                        // (bit 3 : 0 = ouvert, 1 = ferme). Voir "Proximity Pairing Message.md".
++                                        if apple_data.len() > 8 {
++                                            let ouvert = (apple_data[8] & 0x08) == 0;
++                                            if couvercle_ouvert != Some(ouvert) {
++                                                couvercle_ouvert = Some(ouvert);
++                                                info!(
++                                                    "[POPUP] Couvercle du boitier : {} (octet 8 = {:#04x})",
++                                                    if ouvert { "OUVERT" } else { "FERME" },
++                                                    apple_data[8]
++                                                );
++                                            }
++                                        }
+                                         debug!(
+                                             "Decrypted data from airpods_mac {}: {}",
+                                             matched_airpods_mac

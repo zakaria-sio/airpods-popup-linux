@@ -1,0 +1,41 @@
+Patch LibrePods : 06-ecouteurs-dans-boitier
+
+Ajoute dans etat.txt combien d'écouteurs sont dans le boîtier.
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/le.rs b/linux-rust/src/bluetooth/le.rs
+index 834a6d5..db97303 100644
+--- a/linux-rust/src/bluetooth/le.rs
++++ b/linux-rust/src/bluetooth/le.rs
+@@ -71,7 +71,8 @@ fn fermer_popup() {
+ // Ecriture "atomique" : on ecrit un fichier temporaire puis on le renomme,
+ // pour que la pop-up ne lise jamais un fichier a moitie ecrit.
+ fn ecrire_etat_popup(nom: &str, gauche: i32, gauche_charge: bool, droite: i32, droite_charge: bool,
+-                     boitier: i32, boitier_charge: bool, gauche_oreille: bool, droite_oreille: bool) {
++                     boitier: i32, boitier_charge: bool, gauche_oreille: bool, droite_oreille: bool,
++                     dans_boitier: u8) {
+     let home = std::env::var("HOME").unwrap_or_default();
+     let dossier = std::path::PathBuf::from(home).join(".local/share/airpods_popup");
+     if std::fs::create_dir_all(&dossier).is_err() {
+@@ -79,9 +80,9 @@ fn ecrire_etat_popup(nom: &str, gauche: i32, gauche_charge: bool, droite: i32, d
+     }
+     let b = |x: bool| if x { 1 } else { 0 };
+     let contenu = format!(
+-        "nom={}\ngauche={}\ngauche_charge={}\ndroite={}\ndroite_charge={}\nboitier={}\nboitier_charge={}\ngauche_oreille={}\ndroite_oreille={}\n",
++        "nom={}\ngauche={}\ngauche_charge={}\ndroite={}\ndroite_charge={}\nboitier={}\nboitier_charge={}\ngauche_oreille={}\ndroite_oreille={}\ndans_boitier={}\n",
+         nom.replace('\n', " "), gauche, b(gauche_charge), droite, b(droite_charge),
+-        boitier, b(boitier_charge), b(gauche_oreille), b(droite_oreille)
++        boitier, b(boitier_charge), b(gauche_oreille), b(droite_oreille), dans_boitier
+     );
+     let tmp = dossier.join("etat.txt.tmp");
+     if std::fs::write(&tmp, contenu).is_ok() {
+@@ -405,6 +406,8 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
+                                             case_charging,
+                                             is_left_in_ear,
+                                             is_right_in_ear,
++                                            // Octet "status" : bit 2 = les 2 dans le boitier, bit 4 = un seul
++                                            if status & 0x04 != 0 { 2 } else if status & 0x10 != 0 { 1 } else { 0 },
+                                         );
+ 
+                                         if let Some(handle) = &tray_handle_clone {

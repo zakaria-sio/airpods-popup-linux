@@ -1,0 +1,73 @@
+Patch LibrePods : 09-reglages-depuis-popup
+
+Change le mode d'écoute (réduction du bruit, adaptatif, transparence, désactivé) depuis la pop-up.
+
+S'applique sur LibrePods, branche linux/rust, commit 672e65a.
+
+diff --git a/linux-rust/src/bluetooth/aacp.rs b/linux-rust/src/bluetooth/aacp.rs
+index 7bf6d22..5eeb749 100644
+--- a/linux-rust/src/bluetooth/aacp.rs
++++ b/linux-rust/src/bluetooth/aacp.rs
+@@ -620,6 +620,10 @@ impl AACPManager {
+                     } else {
+                         state.control_command_status_list.push(status.clone());
+                     }
++                    // Pop-up : mode d'écoute actuel (2 = réduction du bruit, 3 = transparence, 4 = adaptatif, 1 = désactivé)
++                    if identifier == ControlCommandIdentifiers::ListeningMode {
++                        crate::utils::maj_etat_popup(&[("ecoute", value.first().copied().unwrap_or(0).to_string())]);
++                    }
+                     if identifier == ControlCommandIdentifiers::OwnsConnection {
+                         state.owns = value_bytes[0] != 0;
+                     }
+diff --git a/linux-rust/src/devices/airpods.rs b/linux-rust/src/devices/airpods.rs
+index f0e876c..5b692e4 100644
+--- a/linux-rust/src/devices/airpods.rs
++++ b/linux-rust/src/devices/airpods.rs
+@@ -133,6 +133,23 @@ impl AirPodsDevice {
+                 .await;
+         }
+ 
++        // Ordres venant de la pop-up (bouton Réglages) : on regarde 3 fois par seconde
++        let command_tx_popup = command_tx.clone();
++        tokio::spawn(async move {
++            loop {
++                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
++                if let Some(mode) = crate::utils::lire_commande_popup() {
++                    log::info!("[POPUP] Changement de mode d'ecoute demande : {}", mode);
++                    if command_tx_popup
++                        .send((crate::bluetooth::aacp::ControlCommandIdentifiers::ListeningMode, vec![mode]))
++                        .is_err()
++                    {
++                        break; // AirPods déconnectés : on arrête cette tâche
++                    }
++                }
++            }
++        });
++
+         let aacp_manager_clone = aacp_manager.clone();
+         tokio::spawn(async move {
+             while let Some((id, value)) = command_rx.recv().await {
+diff --git a/linux-rust/src/utils.rs b/linux-rust/src/utils.rs
+index dc768c9..05de89e 100644
+--- a/linux-rust/src/utils.rs
++++ b/linux-rust/src/utils.rs
+@@ -209,6 +209,19 @@ pub fn fermer_popup() {
+     }
+ }
+ 
++/// La pop-up demande un changement de mode d'écoute en écrivant "ecoute=N" dans commande.txt.
++/// On lit le fichier, on le supprime (pour ne pas exécuter deux fois l'ordre) et on renvoie N.
++pub fn lire_commande_popup() -> Option<u8> {
++    let fichier = dossier_popup().join("commande.txt");
++    let contenu = std::fs::read_to_string(&fichier).ok()?;
++    let _ = std::fs::remove_file(&fichier);
++    contenu
++        .lines()
++        .find_map(|l| l.strip_prefix("ecoute="))
++        .and_then(|v| v.trim().parse::<u8>().ok())
++        .filter(|v| matches!(v, 1..=4)) // on n'accepte que les 4 modes connus
++}
++
+ /// Met a jour certaines lignes "cle=valeur" du fichier d'etat lu par la pop-up,
+ /// en gardant les autres. Plusieurs parties de LibrePods y ecrivent (signal du boitier,
+ /// connexion directe), donc on fusionne au lieu d'ecraser.
